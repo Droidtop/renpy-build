@@ -251,6 +251,15 @@ public class PythonSDLActivity extends SDLActivity implements AssetPackStateUpda
         nativeSetEnv("ANDROID_PUBLIC",  externalStorage.getAbsolutePath());
         nativeSetEnv("ANDROID_OLD_PUBLIC", oldExternalStorage.getAbsolutePath());
 
+        String enginehostGamePath = getIntent().getStringExtra("path");
+        if (enginehostGamePath != null) {
+            File enginehostGameFolder = new File(enginehostGamePath);
+            if (!enginehostGameFolder.isDirectory()) {
+                throw new IllegalArgumentException("enginehost path is not a directory: " + enginehostGamePath);
+            }
+            nativeSetEnv("ENGINEHOST_GAME_PATH", enginehostGameFolder.getAbsolutePath());
+        }
+
         // Figure out the APK path.
         String apkFilePath;
         ApplicationInfo appInfo;

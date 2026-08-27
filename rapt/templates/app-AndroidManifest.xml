@@ -28,6 +28,18 @@
 
     </activity>
 
+    <activity
+        android:name="org.renpy.android.EngineHostRunActivity"
+        android:exported="true">
+      <intent-filter>
+        <action android:name="dev.enginehost.plugin.RUN" />
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+      <meta-data android:name="dev.enginehost.plugin.engine" android:value="renpy" />
+      <meta-data android:name="dev.enginehost.plugin.pluginVersion" android:value="{{ config.version }}" />
+      <meta-data android:name="dev.enginehost.plugin.capabilities" android:resource="@raw/enginehost_capabilities" />
+    </activity>
+
     <provider
         android:name="org.renpy.android.RenPyFileProvider"
         android:authorities="{{ config.package }}.fileprovider"
