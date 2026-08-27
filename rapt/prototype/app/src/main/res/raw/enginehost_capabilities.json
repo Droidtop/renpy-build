@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "capabilities": [
+    {
+      "id": "renpy-8.5.3",
+      "engineContext": "default",
+      "runtimeVersion": "8.5.3"
+    }
+  ]
+}
