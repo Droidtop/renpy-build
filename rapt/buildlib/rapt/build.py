@@ -1,4 +1,4 @@
-import collections
+import concurrent.futures
 import gzip
 import hashlib
 import os
@@ -119,9 +119,8 @@ def render(always, template, dest, **kwargs):
     template = environment.get_template(template)
     text = template.render(**kwargs)
 
-    f = open(dest, "wb")
-    f.write(text.encode("utf-8"))
-    f.close()
+    with open(dest, "wb") as f:
+        f.write(text.encode("utf-8"))
 
 
 def make_tar(iface, fn, source_dirs):
@@ -182,32 +181,6 @@ def make_tar(iface, fn, source_dirs):
     tf.close()
 
 
-def make_tree(src, dest):
-    src = plat.path(src)
-    dest = plat.path(dest)
-
-    def ignore(dir, files):
-        rv = []
-
-        for basename in files:
-            fn = os.path.join(dir, basename)
-            relfn = os.path.relpath(fn, src)
-
-            ignore = False
-
-            if blocklist.match(relfn):
-                ignore = True
-            if keeplist.match(relfn):
-                ignore = False
-
-            if ignore:
-                rv.append(basename)
-
-        return rv
-
-    shutil.copytree(src, dest, ignore=ignore)
-
-
 def copy_into(src, dest):
     """
     Copies all files from `src` into `dest`, creating
@@ -232,64 +205,200 @@ def copy_into(src, dest):
     shutil.copy2(src, dest)
 
 
+def make_assets_tree(src, dst):
+    """
+    Copies a subset of files from src to dst (governed by blocklist/keeplist)
+    in a single concurrent pass. Additionally, because Ren'Py uses a lot of
+    names that don't work as assets, every path segment is prefixed with 'x-'.
+    """
+
+    src = plat.path(src)
+    dst = plat.path(dst)
+
+    copy2 = shutil.copy2
+
+    def copy(pair):
+        old, new = pair
+
+        if old[-3:] == ".gz":
+            # AAPT unavoidably gunzips files with a .gz extension.
+            # To prevent this we temporarily double gzip such files,
+            # leaving AAPT to unpack them back into the original
+            # location. /o\
+            with open(old, "rb") as r, gzip.open(f'{new}.gz', "wb") as w:
+                shutil.copyfileobj(r, w)
+
+        else:
+            copy2(old, new)
+
+    def walk(old, new):
+        drop = blocklist.match
+        keep = keeplist.match
+
+        mkdir = os.mkdir
+        relpath = os.path.relpath
+        sep = os.sep
+
+        # join: Faster than os.path.join for our purposes.
+        join = lambda a, b: f"{a}{sep}{b}"
+
+        # Special case the top-level iteration where rel_path='.', then
+        # replace with normal join function in subsequent iterations.
+        # join1: ignore 1st arg
+        join1 = lambda a, b: b
+
+        cache = {old: new}
+
+        mkdir(new)
+
+        for old_stem, dirnames, filenames in os.walk(old):
+            new_stem = cache[old_stem]
+            rel_stem = relpath(old_stem, old)
+
+            visit = []
+
+            for name in dirnames:
+                rel_path = join1(rel_stem, name)
+
+                if drop(rel_path) and not keep(rel_path):
+                    continue
+
+                old_path = join(old_stem, name)
+                new_path = join(new_stem, f"x-{name}")
+
+                cache[old_path] = new_path
+                visit.append(name)
+
+                mkdir(new_path)
+
+            dirnames[:] = visit
+
+            for name in filenames:
+                rel_path = join1(rel_stem, name)
+
+                if drop(rel_path) and not keep(rel_path):
+                    continue
+
+                old_path = join(old_stem, name)
+                new_path = join(new_stem, f"x-{name}")
+
+                yield old_path, new_path
+
+            join1 = join
+
+    # Limiting factor is I/O not CPU, so use a fixed value for max workers.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        for _ in executor.map(copy, walk(src, dst)):
+            pass
+
+
 MAX_SIZE = 1000000000
 
 
 def make_bundle_tree(src):
     src = plat.path(src)
-    sizes = collections.defaultdict(int)
 
-    targets = [
-        plat.path("project/ff1/src/main/assets"),
-        plat.path("project/ff2/src/main/assets"),
-        plat.path("project/ff3/src/main/assets"),
-        plat.path("project/ff4/src/main/assets"),
-    ]
+    dst = []
+    vol = {}
 
-    # Write at least one file in each assets directory, to make sure that
-    # all exist.
-    for i in targets:
-        if os.path.isdir(i):
-            shutil.rmtree(i)
+    rename = plat.rename
+
+    # Initialise an assets directory for each bundle and add a test
+    # file to make sure they exist and are writable.
+    for i in range(1, 5):
+        root = plat.path(f"project/ff{i}/src/main/assets")
+
+        if os.path.isdir(root):
+            shutil.rmtree(root)
 
         try:
-            os.makedirs(i, 0o777)
+            os.makedirs(root, 0o777)
         except Exception:
             pass
 
-        with open(os.path.join(i, "00_pack.txt"), "w") as f:
+        with open(os.path.join(root, "00_pack.txt"), "w") as f:
             f.write("Shiro was here.\n")
 
-    for dirpath, _, filenames in os.walk(src):
-        for fn in filenames:
-            if fn[0] == ".":
-                continue
+        dst.append(root)
+        vol[root] = 0
 
-            old = os.path.join(dirpath, fn)
-            size = os.path.getsize(old)
+    def move(pair):
+        old, new = pair
 
-            matchfn = os.path.relpath(old, src)
+        rename(old, new)
 
-            if blocklist.match(matchfn) and not keeplist.match(matchfn):
-                continue
+    def walk(old, new):
+        drop = blocklist.match
+        keep = keeplist.match
 
-            for target in targets:
-                if sizes[target] + size <= MAX_SIZE:
-                    break
-            else:
-                raise Exception("Game too big for bundle, or single file > 500MB.")
+        getsize = os.path.getsize
+        makedirs = os.makedirs
+        relpath = os.path.relpath
+        sep = os.sep
 
-            sizes[target] += size
+        # join: Faster than os.path.join for our purposes.
+        join = lambda a, b: f"{a}{sep}{b}"
 
-            new = os.path.join(target, os.path.relpath(dirpath, src), fn)
-            newdir = os.path.join(target, os.path.relpath(dirpath, src))
+        # Special case the top-level iteration where rel_path='.', then
+        # replace with normal join function in subsequent iterations.
+        # join1: ignore 1st arg
+        # join2: ignore 2nd arg
+        join1 = lambda a, b: b
+        join2 = lambda a, b: a
 
-            try:
-                os.makedirs(newdir, 0o777)
-            except Exception:
-                pass
+        cache = set(new)
+        cache_add = cache.add
 
-            plat.rename(old, new)
+        for old_stem, dirnames, filenames in os.walk(old):
+            rel_stem = relpath(old_stem, old)
+
+            visit = []
+
+            for name in dirnames:
+                rel_path = join1(rel_stem, name)
+
+                if drop(rel_path) and not keep(rel_path):
+                    continue
+
+                visit.append(name)
+
+            dirnames[:] = visit
+
+            for name in filenames:
+                rel_path = join1(rel_stem, name)
+
+                if drop(rel_path) and not keep(rel_path):
+                    continue
+
+                old_path = join(old_stem, name)
+                old_size = getsize(old_path)
+
+                threshold = MAX_SIZE - old_size
+
+                for new_root in new:
+                    if vol[new_root] <= threshold:
+                        break
+                else:
+                    raise Exception("Game too big for bundle, or single file > 1 GB.")
+
+                vol[new_root] += old_size
+
+                new_stem = join2(new_root, rel_stem)
+
+                if new_stem not in cache:
+                    makedirs(new_stem)
+                    cache_add(new_stem)
+
+                new_path = join(new_stem, name)
+
+                yield old_path, new_path
+
+            join1 = join2 = join
+
+    # Limiting factor is I/O not CPU, so use a fixed value for max workers.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        for _ in executor.map(move, walk(src, dst)):
+            pass
 
 
 def join_and_check(base, sub):
@@ -450,7 +559,8 @@ def copy_project(update_always=False):
         fn = plat.path(fn)
 
         if os.path.exists(fn):
-            return open(fn).read().strip()
+            with open(fn) as f:
+                return f.read().strip()
         else:
             return None
 
@@ -580,7 +690,18 @@ def build(
     assets = plat.path("project/app/src/main/assets")
 
     if os.path.isdir(assets):
-        shutil.rmtree(assets)
+        def on_rm_error(func, p, exc_info):
+            try:
+                os.chmod(p, 0o777)
+                func(p)
+            except Exception:
+                pass
+        for _ in range(3):
+            try:
+                shutil.rmtree(assets, onerror=on_rm_error)
+                break
+            except Exception:
+                time.sleep(0.3)
 
     big_bundle = bundle and size_tree(assets_dir) > 50 * 1024 * 1024
 
@@ -589,40 +710,8 @@ def build(
         if big_bundle:
             os.mkdir(assets)
             make_bundle_tree(assets_dir)
-
         else:
-            make_tree(assets_dir, assets)
-
-            # Ren'Py uses a lot of names that don't work as assets. Auto-rename
-            # them.
-            for dirpath, dirnames, filenames in os.walk(assets, topdown=False):
-                # Sort names longest to shortest to ensure that adding the "x-"
-                # prefix will not overwrite an asset before it has been moved.
-                names = sorted(dirnames + filenames, key=len, reverse=True)
-
-                for fn in names:
-                    if fn[0] == ".":
-                        continue
-
-                    old = os.path.join(dirpath, fn)
-                    new = os.path.join(dirpath, "x-" + fn)
-
-                    plat.rename(old, new)
-
-                    if new[-3:] != ".gz":
-                        continue
-
-                    # AAPT unavoidably gunzips files with a .gz extension.
-                    # To prevent this we temporarily double gzip such files,
-                    # leaving AAPT to unpack them back into the original
-                    # location. /o\
-
-                    old, new = new, new + ".gz"
-
-                    with open(old, "rb") as src, gzip.open(new, "wb") as out:
-                        shutil.copyfileobj(src, out)
-
-                    os.unlink(old)
+            make_assets_tree(assets_dir, assets)
 
     iface.background(make_assets)
 
