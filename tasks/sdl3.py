@@ -1,7 +1,7 @@
 from renpybuild.context import Context
 from renpybuild.task import task
 
-version = "3.4.8"
+version = "3.4.18"
 
 
 @task(kind="host", platforms="all", always=True)
@@ -27,7 +27,7 @@ def unpack(c: Context):
         c.chdir("SDL3-{{version}}")
         c.patch("sdl3-opengl-ios.diff")
         c.patch("sdl3-metalangle.diff")
-        c.patch("sdl3-windows-ime.diff")
+        c.patch("sdl3-ios27-orientation.diff")
 
 
 @task(platforms="all")
